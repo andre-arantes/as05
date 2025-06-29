@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Classe para embeddings usando sentence_transformers
 class SentenceTransformerEmbeddings(Embeddings):
-    def __init__(self, model_name="sentence-transformers/all-mpnet-base-v2"):
+    def __init__(self, model_name="sentence-transformers/all-MiniLM-L6-v2"):
         self.model = SentenceTransformer(model_name)
         self.dimension = self.model.get_sentence_embedding_dimension()
 
@@ -60,28 +60,30 @@ def load_llm():
         st.error(f"Erro ao carregar LLM: {e}")
         raise
 
-# Função para extrair texto de PDFs
+# Função para extrair texto de PDFs e coletar nomes dos arquivos
 def extract_text_from_pdf(pdf_files):
     logger.info("Extraindo texto de %d PDFs", len(pdf_files))
     text = ""
+    file_names = []
     for pdf in pdf_files:
         try:
+            file_names.append(pdf.name)
             reader = PdfReader(pdf)
             for page in reader.pages:
                 extracted_text = page.extract_text() or ""
                 text += extracted_text + "\n"
         except Exception as e:
-            logger.error("Erro ao extrair texto do PDF: %s", e)
-            st.error(f"Erro ao extrair texto do PDF: {e}")
+            logger.error("Erro ao extrair texto do PDF %s: %s", pdf.name, e)
+            st.error(f"Erro ao extrair texto do PDF {pdf.name}: {e}")
     logger.info("Extração de texto finalizada. Tamanho: %d caracteres", len(text))
-    return text
+    return text, file_names
 
 # Função para dividir texto em chunks
 def get_text_chunks(text, max_chunk_size=500):
     logger.info("Dividindo texto em chunks...")
     chunks = []
     current_chunk = ""
-    for sentence in text.split('. '):  # Dividir por frases
+    for sentence in text.split('. '):
         if len(current_chunk) + len(sentence) < max_chunk_size:
             current_chunk += sentence + ". "
         else:
@@ -95,22 +97,21 @@ def get_text_chunks(text, max_chunk_size=500):
     return chunks
 
 # Função para criar o índice FAISS e documentos
-def create_faiss_index(embeddings, text_chunks):
+def create_faiss_index(embeddings, text_chunks, file_names):
     if embeddings.size == 0:
         logger.warning("Nenhum embedding para criar o índice FAISS.")
         return None, None
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
-    documents = [Document(page_content=chunk, metadata={"source": "uploaded_pdf"}) for chunk in text_chunks]
+    documents = [Document(page_content=chunk, metadata={"source": "uploaded_pdf", "file_name": file_names[0]}) for chunk in text_chunks]
     logger.info("Índice FAISS e documentos criados com sucesso.")
     return index, documents
 
 # Função para criar a cadeia de conversação
 def get_conversational_chain():
     logger.info("Inicializando cadeia de conversação...")
-    prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa.
-Se não souber, diga que não sabe.
+    prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa. Se a pergunta for sobre o nome do arquivo, use o metadata do arquivo. Se não souber a resposta ou o contexto não for suficiente, diga "Não sei".
 
 [Contexto]
 {context}
@@ -156,6 +157,8 @@ if "documents" not in st.session_state:
     st.session_state.documents = []
 if "documents_processed" not in st.session_state:
     st.session_state.documents_processed = False
+if "file_names" not in st.session_state:
+    st.session_state.file_names = []
 
 # Exibir mensagens do chat
 for message in st.session_state.messages:
@@ -182,21 +185,27 @@ if user_question:
             
             # Truncar contexto para evitar excesso de tokens
             context = " ".join([doc.page_content for doc in relevant_documents])
-            max_context_length = 700  # Aproximadamente 700 tokens
+            max_context_length = 700
             if len(context) > max_context_length:
                 context = context[:max_context_length]
                 logger.info("Contexto truncado para %d caracteres", max_context_length)
             
-            document_chain = get_conversational_chain()
-            retriever = create_retriever(st.session_state.documents, st.session_state.faiss_index)
-            rag_chain = create_retrieval_chain(retriever, document_chain)
-            
-            with st.spinner("Gerando resposta..."):
-                response = rag_chain.invoke({"input": user_question, "context": context})
-                response_text = response["answer"].strip()
-                # Limpar a resposta, removendo qualquer prefixo indesejado
-                if response_text.startswith("[Resposta]"):
-                    response_text = response_text[len("[Resposta]"):].strip()
+            # Verificar se a pergunta é sobre o nome do arquivo
+            if "nome do arquivo" in user_question.lower() and st.session_state.file_names:
+                response_text = f"O nome do arquivo é: {st.session_state.file_names[0]}"
+            else:
+                document_chain = get_conversational_chain()
+                retriever = create_retriever(st.session_state.documents, st.session_state.faiss_index)
+                rag_chain = create_retrieval_chain(retriever, document_chain)
+                
+                with st.spinner("Gerando resposta..."):
+                    response = rag_chain.invoke({"input": user_question, "context": context})
+                    response_text = response["answer"].strip()
+                    # Limpar resposta repetitiva
+                    if response_text.startswith("[Resposta]"):
+                        response_text = response_text.replace("[Resposta]", "").strip()
+                    if not response_text:
+                        response_text = "Não sei"
 
             with st.chat_message("assistant"):
                 st.markdown(f"**Resposta:**\n{response_text}")
@@ -219,12 +228,12 @@ with st.sidebar:
             try:
                 with st.spinner("Processando PDFs... Isso pode levar um momento."):
                     logger.info("Iniciando processamento de PDFs.")
-                    raw_text = extract_text_from_pdf(pdf_docs)
+                    raw_text, st.session_state.file_names = extract_text_from_pdf(pdf_docs)
                     st.session_state.text_chunks = get_text_chunks(raw_text)
                     embedding_function = SentenceTransformerEmbeddings()
                     st.session_state.embeddings = embedding_function.embed_documents(st.session_state.text_chunks)
                     st.session_state.faiss_index, st.session_state.documents = create_faiss_index(
-                        st.session_state.embeddings, st.session_state.text_chunks
+                        st.session_state.embeddings, st.session_state.text_chunks, st.session_state.file_names
                     )
                     st.session_state.documents_processed = True
                     st.success(f"✔️ {len(pdf_docs)} PDFs processados com sucesso! Agora você pode fazer perguntas.")
@@ -241,6 +250,7 @@ with st.sidebar:
         st.session_state.embeddings = None
         st.session_state.faiss_index = None
         st.session_state.documents = []
+        st.session_state.file_names = []
         st.rerun()
 
 st.markdown("---")
