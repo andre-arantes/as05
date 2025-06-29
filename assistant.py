@@ -12,6 +12,7 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 import faiss
 import logging
+from transformers import AutoTokenizer  # Usado apenas para truncagem de tokens
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -60,15 +61,42 @@ def load_llm():
         st.error(f"Erro ao carregar LLM: {e}")
         raise
 
-# Função para extrair texto de PDFs e coletar nomes dos arquivos
+# Função para truncar contexto com base em tokens
+def truncate_context(context, question, max_tokens=900):
+    tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
+    prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa. Se a pergunta for sobre o nome do arquivo ou autor, use o metadata do arquivo. Se não souber a resposta ou o contexto não for suficiente, diga "Não sei".
+
+[Contexto]
+{context}
+
+[Pergunta]
+{question}
+
+[Resposta]
+"""
+    # Estimar tokens do prompt sem contexto
+    base_prompt = prompt_template.format(context="", question=question)
+    base_tokens = len(tokenizer.encode(base_prompt))
+    remaining_tokens = max_tokens - base_tokens
+    
+    # Truncar contexto para caber nos tokens restantes
+    context_tokens = tokenizer.encode(context)[:remaining_tokens]
+    truncated_context = tokenizer.decode(context_tokens, skip_special_tokens=True)
+    return truncated_context
+
+# Função para extrair texto de PDFs e coletar metadados
 def extract_text_from_pdf(pdf_files):
     logger.info("Extraindo texto de %d PDFs", len(pdf_files))
     text = ""
     file_names = []
+    authors = []
     for pdf in pdf_files:
         try:
             file_names.append(pdf.name)
             reader = PdfReader(pdf)
+            metadata = reader.metadata or {}
+            author = metadata.get('/Author', 'Desconhecido')
+            authors.append(author)
             for page in reader.pages:
                 extracted_text = page.extract_text() or ""
                 text += extracted_text + "\n"
@@ -76,10 +104,10 @@ def extract_text_from_pdf(pdf_files):
             logger.error("Erro ao extrair texto do PDF %s: %s", pdf.name, e)
             st.error(f"Erro ao extrair texto do PDF {pdf.name}: {e}")
     logger.info("Extração de texto finalizada. Tamanho: %d caracteres", len(text))
-    return text, file_names
+    return text, file_names, authors
 
 # Função para dividir texto em chunks
-def get_text_chunks(text, max_chunk_size=500):
+def get_text_chunks(text, max_chunk_size=400):
     logger.info("Dividindo texto em chunks...")
     chunks = []
     current_chunk = ""
@@ -97,21 +125,21 @@ def get_text_chunks(text, max_chunk_size=500):
     return chunks
 
 # Função para criar o índice FAISS e documentos
-def create_faiss_index(embeddings, text_chunks, file_names):
+def create_faiss_index(embeddings, text_chunks, file_names, authors):
     if embeddings.size == 0:
         logger.warning("Nenhum embedding para criar o índice FAISS.")
         return None, None
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
-    documents = [Document(page_content=chunk, metadata={"source": "uploaded_pdf", "file_name": file_names[0]}) for chunk in text_chunks]
+    documents = [Document(page_content=chunk, metadata={"source": "uploaded_pdf", "file_name": file_names[0], "author": authors[0]}) for chunk in text_chunks]
     logger.info("Índice FAISS e documentos criados com sucesso.")
     return index, documents
 
 # Função para criar a cadeia de conversação
 def get_conversational_chain():
     logger.info("Inicializando cadeia de conversação...")
-    prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa. Se a pergunta for sobre o nome do arquivo, use o metadata do arquivo. Se não souber a resposta ou o contexto não for suficiente, diga "Não sei".
+    prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa. Se a pergunta for sobre o nome do arquivo ou autor, use o metadata do arquivo. Se não souber a resposta ou o contexto não for suficiente, diga "Não sei".
 
 [Contexto]
 {context}
@@ -159,6 +187,8 @@ if "documents_processed" not in st.session_state:
     st.session_state.documents_processed = False
 if "file_names" not in st.session_state:
     st.session_state.file_names = []
+if "authors" not in st.session_state:
+    st.session_state.authors = []
 
 # Exibir mensagens do chat
 for message in st.session_state.messages:
@@ -183,17 +213,16 @@ if user_question:
             D, I = st.session_state.faiss_index.search(np.array([query_embedding]).astype('float32'), k=3)
             relevant_documents = [st.session_state.documents[i] for i in I[0] if i < len(st.session_state.documents)]
             
-            # Truncar contexto para evitar excesso de tokens
-            context = " ".join([doc.page_content for doc in relevant_documents])
-            max_context_length = 700
-            if len(context) > max_context_length:
-                context = context[:max_context_length]
-                logger.info("Contexto truncado para %d caracteres", max_context_length)
-            
-            # Verificar se a pergunta é sobre o nome do arquivo
+            # Verificar se a pergunta é sobre o nome do arquivo ou autor
             if "nome do arquivo" in user_question.lower() and st.session_state.file_names:
                 response_text = f"O nome do arquivo é: {st.session_state.file_names[0]}"
+            elif "autor" in user_question.lower() and st.session_state.authors:
+                response_text = f"O autor do arquivo é: {st.session_state.authors[0]}"
             else:
+                # Truncar contexto com base em tokens
+                context = " ".join([doc.page_content for doc in relevant_documents])
+                context = truncate_context(context, user_question, max_tokens=900)
+                
                 document_chain = get_conversational_chain()
                 retriever = create_retriever(st.session_state.documents, st.session_state.faiss_index)
                 rag_chain = create_retrieval_chain(retriever, document_chain)
@@ -214,7 +243,6 @@ if user_question:
             logger.exception("Erro ao gerar resposta: %s", e)
             st.error(f"Erro ao gerar resposta: {e}")
 
-# Sidebar para upload de PDFs
 with st.sidebar:
     st.title("Seus Documentos")
     pdf_docs = st.file_uploader(
@@ -228,12 +256,12 @@ with st.sidebar:
             try:
                 with st.spinner("Processando PDFs... Isso pode levar um momento."):
                     logger.info("Iniciando processamento de PDFs.")
-                    raw_text, st.session_state.file_names = extract_text_from_pdf(pdf_docs)
+                    raw_text, st.session_state.file_names, st.session_state.authors = extract_text_from_pdf(pdf_docs)
                     st.session_state.text_chunks = get_text_chunks(raw_text)
                     embedding_function = SentenceTransformerEmbeddings()
                     st.session_state.embeddings = embedding_function.embed_documents(st.session_state.text_chunks)
                     st.session_state.faiss_index, st.session_state.documents = create_faiss_index(
-                        st.session_state.embeddings, st.session_state.text_chunks, st.session_state.file_names
+                        st.session_state.embeddings, st.session_state.text_chunks, st.session_state.file_names, st.session_state.authors
                     )
                     st.session_state.documents_processed = True
                     st.success(f"✔️ {len(pdf_docs)} PDFs processados com sucesso! Agora você pode fazer perguntas.")
@@ -251,6 +279,7 @@ with st.sidebar:
         st.session_state.faiss_index = None
         st.session_state.documents = []
         st.session_state.file_names = []
+        st.session_state.authors = []
         st.rerun()
 
 st.markdown("---")
