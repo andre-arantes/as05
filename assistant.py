@@ -127,16 +127,8 @@ def generate_response(query, context, file_names, authors, titles):
     context_str = truncate_context(context_str, query, max_tokens=800)
     
     prompt_template = ChatPromptTemplate.from_template(
-        """Você é um assistente útil. Responda em português, de forma breve e precisa. Para perguntas sobre nome do arquivo, autor ou título, use o metadata. Para resumo, resuma em até 3 frases. Se não souber, diga "Não sei".
-
-[Contexto]
-{context}
-
-[Pergunta]
-{input}
-
-[Resposta]
-"""
+        f"Com base nos documentos, sobre '{query}', encontrei as seguintes informações:\n\n{context_str}\n\n" \
+        f""
     )
     
     llm = load_llm()
