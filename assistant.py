@@ -1,30 +1,23 @@
 import streamlit as st
 from PyPDF2 import PdfReader
-from langchain_huggingface import HuggingFaceEndpoint
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 import numpy as np
 import faiss
-import os
-from dotenv import load_dotenv
+import torch
 import logging
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Carregar variáveis de ambiente
-load_dotenv()
-token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-if not token:
-    logger.warning("Token da HuggingFace não encontrado no .env! Certifique-se de configurá-lo.")
-    st.error("Token da HuggingFace não configurado. Adicione HUGGINGFACEHUB_API_TOKEN ao arquivo .env.")
 
 # Classe para embeddings usando sentence_transformers
 class SentenceTransformerEmbeddings(Embeddings):
@@ -51,6 +44,36 @@ class SentenceTransformerEmbeddings(Embeddings):
             logger.error("Erro ao gerar embedding para query '%s': %s", text[:50], e)
             st.error(f"Erro ao gerar embedding para query: {e}")
             return np.zeros(self.dimension).astype('float32')
+
+# Função para carregar o modelo de linguagem
+@st.cache_resource
+def load_llm():
+    logger.info("Carregando modelo de linguagem HuggingFaceH4/zephyr-7b-beta...")
+    try:
+        model_name = "HuggingFaceH4/zephyr-7b-beta"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto" if torch.cuda.is_available() else "cpu",
+            low_cpu_mem_usage=True
+        )
+        pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=512,
+            temperature=0.1,
+            do_sample=True,
+            return_full_text=False
+        )
+        llm = HuggingFacePipeline(pipeline=pipe)
+        logger.info("LLM carregado com sucesso.")
+        return llm
+    except Exception as e:
+        logger.error("Erro ao carregar LLM: %s", e)
+        st.error(f"Erro ao carregar LLM: {e}")
+        raise
 
 # Função para extrair texto de PDFs
 def extract_text_from_pdf(pdf_files):
@@ -89,7 +112,7 @@ def create_faiss_index(embeddings, text_chunks):
 
 # Função para criar a cadeia de conversação
 def get_conversational_chain():
-    logger.info("Inicializando cadeia de conversação com LLM da HuggingFace...")
+    logger.info("Inicializando cadeia de conversação...")
     prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa.
 Se não souber, diga que não sabe.
 
@@ -102,21 +125,7 @@ Se não souber, diga que não sabe.
 [Resposta]
 """
     prompt = ChatPromptTemplate.from_template(prompt_template)
-    
-    try:
-        llm = HuggingFaceEndpoint(
-            endpoint_url="https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
-            huggingfacehub_api_token=token,
-            task="text-generation",
-            temperature=0.1,
-            max_new_tokens=512
-        )
-        logger.info("LLM carregada com sucesso: HuggingFaceH4/zephyr-7b-beta.")
-    except Exception as e:
-        logger.error("Erro ao carregar HuggingFaceEndpoint LLM: %s", e)
-        st.error(f"Erro ao carregar LLM: {e}")
-        raise
-    
+    llm = load_llm()
     document_chain = create_stuff_documents_chain(llm, prompt)
     return document_chain
 
