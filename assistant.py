@@ -1,18 +1,16 @@
 import streamlit as st
 from PyPDF2 import PdfReader
+from langchain_community.llms import HuggingFacePipeline
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
-from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 import numpy as np
 import faiss
-import torch
 import logging
 
 # Configuração de logging
@@ -23,7 +21,7 @@ logger = logging.getLogger(__name__)
 class SentenceTransformerEmbeddings(Embeddings):
     def __init__(self, model_name="sentence-transformers/all-mpnet-base-v2"):
         self.model = SentenceTransformer(model_name)
-        self.dimension = self.model.get_sentence_embedding_dimension()  # Obtém a dimensão do modelo
+        self.dimension = self.model.get_sentence_embedding_dimension()
 
     def embed_documents(self, texts):
         logger.info("Gerando embeddings para %d textos via sentence_transformers...", len(texts))
@@ -48,26 +46,13 @@ class SentenceTransformerEmbeddings(Embeddings):
 # Função para carregar o modelo de linguagem
 @st.cache_resource
 def load_llm():
-    logger.info("Carregando modelo de linguagem HuggingFaceH4/zephyr-7b-beta...")
+    logger.info("Carregando modelo de linguagem distilgpt2...")
     try:
-        model_name = "HuggingFaceH4/zephyr-7b-beta"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto" if torch.cuda.is_available() else "cpu",
-            low_cpu_mem_usage=True
+        llm = HuggingFacePipeline.from_model_id(
+            model_id="distilgpt2",
+            task="text-generation",
+            pipeline_kwargs={"max_new_tokens": 512, "temperature": 0.1, "do_sample": True}
         )
-        pipe = pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            max_new_tokens=512,
-            temperature=0.1,
-            do_sample=True,
-            return_full_text=False
-        )
-        llm = HuggingFacePipeline(pipeline=pipe)
         logger.info("LLM carregado com sucesso.")
         return llm
     except Exception as e:
@@ -110,7 +95,7 @@ def create_faiss_index(embeddings, text_chunks):
     logger.info("Índice FAISS e documentos criados com sucesso.")
     return index, documents
 
-# Função para criar a cadeia de conversação
+# Função para criar a cadeia inevitável de conversação
 def get_conversational_chain():
     logger.info("Inicializando cadeia de conversação...")
     prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa.
@@ -231,7 +216,7 @@ with st.sidebar:
         else:
             st.warning("Carregue pelo menos um arquivo PDF para processar.")
 
-    if 'faiss_index' in st.session_state and st.session_state.faiss_index is not None and st.button("Resetar e fazer upload de novos PDFs"):
+    if 'faiss_index' in st.session_state and st.session_state.faiss_index is None and st.button("Resetar e fazer upload de novos PDFs"):
         st.session_state.documents_processed = False
         st.session_state.messages = []
         st.session_state.text_chunks = []
