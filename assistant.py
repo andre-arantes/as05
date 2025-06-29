@@ -51,7 +51,7 @@ def load_llm():
         llm = HuggingFacePipeline.from_model_id(
             model_id="distilgpt2",
             task="text-generation",
-            pipeline_kwargs={"max_new_tokens": 512, "temperature": 0.1, "do_sample": True}
+            pipeline_kwargs={"max_new_tokens": 256, "temperature": 0.1, "do_sample": True}
         )
         logger.info("LLM carregado com sucesso.")
         return llm
@@ -77,9 +77,20 @@ def extract_text_from_pdf(pdf_files):
     return text
 
 # Função para dividir texto em chunks
-def get_text_chunks(text):
+def get_text_chunks(text, max_chunk_size=500):
     logger.info("Dividindo texto em chunks...")
-    chunks = [chunk.strip() for chunk in text.split('\n\n') if chunk.strip()]
+    chunks = []
+    current_chunk = ""
+    for sentence in text.split('. '):  # Dividir por frases
+        if len(current_chunk) + len(sentence) < max_chunk_size:
+            current_chunk += sentence + ". "
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + ". "
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    chunks = [chunk for chunk in chunks if chunk]
     logger.info("Número de chunks gerados: %d", len(chunks))
     return chunks
 
@@ -95,7 +106,7 @@ def create_faiss_index(embeddings, text_chunks):
     logger.info("Índice FAISS e documentos criados com sucesso.")
     return index, documents
 
-# Função para criar a cadeia inevitável de conversação
+# Função para criar a cadeia de conversação
 def get_conversational_chain():
     logger.info("Inicializando cadeia de conversação...")
     prompt_template = """Você é um assistente útil. Responda à pergunta com base no contexto, **em português**, de forma breve e precisa.
@@ -125,7 +136,7 @@ def create_retriever(documents, faiss_index):
         docstore=docstore,
         index_to_docstore_id=index_to_docstore_id
     )
-    return vector_store.as_retriever()
+    return vector_store.as_retriever(search_kwargs={"k": 3})
 
 # Configuração do Streamlit
 st.set_page_config(page_title="Tarefa AS05", layout="centered")
@@ -169,12 +180,19 @@ if user_question:
             D, I = st.session_state.faiss_index.search(np.array([query_embedding]).astype('float32'), k=3)
             relevant_documents = [st.session_state.documents[i] for i in I[0] if i < len(st.session_state.documents)]
             
+            # Truncar contexto para evitar excesso de tokens
+            context = " ".join([doc.page_content for doc in relevant_documents])
+            max_context_length = 700  # Aproximadamente 700 tokens
+            if len(context) > max_context_length:
+                context = context[:max_context_length]
+                logger.info("Contexto truncado para %d caracteres", max_context_length)
+            
             document_chain = get_conversational_chain()
             retriever = create_retriever(st.session_state.documents, st.session_state.faiss_index)
             rag_chain = create_retrieval_chain(retriever, document_chain)
             
             with st.spinner("Gerando resposta..."):
-                response = rag_chain.invoke({"input": user_question})
+                response = rag_chain.invoke({"input": user_question, "context": context})
                 response_text = response["answer"].strip()
                 # Limpar a resposta, removendo qualquer prefixo indesejado
                 if response_text.startswith("[Resposta]"):
@@ -216,7 +234,7 @@ with st.sidebar:
         else:
             st.warning("Carregue pelo menos um arquivo PDF para processar.")
 
-    if 'faiss_index' in st.session_state and st.session_state.faiss_index is None and st.button("Resetar e fazer upload de novos PDFs"):
+    if 'faiss_index' in st.session_state and st.session_state.faiss_index is not None and st.button("Resetar e fazer upload de novos PDFs"):
         st.session_state.documents_processed = False
         st.session_state.messages = []
         st.session_state.text_chunks = []
