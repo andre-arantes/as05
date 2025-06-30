@@ -1,12 +1,12 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 from langchain_community.llms import HuggingFacePipeline
-from langchain_core.prompts import ChatPromptTemplate
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import faiss
 from transformers import AutoTokenizer
 import logging
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +24,10 @@ def extract_text_from_pdf(pdf_files):
         except Exception as e:
             st.error(f"Erro ao extrair texto do PDF {pdf.name}: {e}")
     return text
+
+def clean_text(text):
+    # Remove letras espaçadas (ex: "C a p a z" -> "Capaz")
+    return re.sub(r'(?<=\b)(?:[A-Za-zÀ-ÿ]\s)+(?=[A-Za-zÀ-ÿ])', lambda m: m.group(0).replace(" ", ""), text)
 
 def get_text_chunks(text, max_chunk_size=300):
     chunks = []
@@ -59,7 +63,7 @@ def create_faiss_index(embeddings):
 
 def truncate_context(context, question, max_tokens=800):
     tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
-    prompt = f"{context}\n\nPergunta: {question}\nResposta:"
+    prompt = f"{context}\n\nPergunta: {question}"
     tokens = tokenizer.encode(prompt)
     truncated = tokenizer.decode(tokens[:max_tokens], skip_special_tokens=True)
     return truncated
@@ -70,11 +74,7 @@ def load_llm():
         return HuggingFacePipeline.from_model_id(
             model_id="google/flan-t5-base",
             task="text2text-generation",
-            pipeline_kwargs={
-                "max_new_tokens": 200,
-                "temperature": 0.05,
-                "do_sample": True
-            }
+            pipeline_kwargs={"max_new_tokens": 200, "temperature": 0.05, "do_sample": True}
         )
     except Exception as e:
         st.error(f"Erro ao carregar LLM: {e}")
@@ -87,21 +87,17 @@ def generate_response(query, context):
     context_str = "\n".join(context)
     context_str = truncate_context(context_str, query, max_tokens=800)
 
-    prompt_template = ChatPromptTemplate.from_template(
-        f"Leia o conteúdo abaixo e responda de forma direta à pergunta.\n\n[Conteúdo]\n{context_str}\n\n[Pergunta]\n{query}\n\n[Resposta]"
-    )
-
     llm = load_llm()
-    chain = prompt_template | llm
+    prompt = f"Responda com base no texto abaixo:\n\n{context_str}\n\nPergunta: {query}"
 
     try:
-        response = chain.invoke({"context": context_str, "input": query}).strip()
-        return response.replace("[Resposta]", "").strip() or "Não sei"
+        response = llm.invoke(prompt).strip()
+        return response or "Não sei"
     except Exception as e:
         logger.error("Erro ao gerar resposta: %s", e)
         return "Houve um erro ao tentar gerar a resposta."
 
-
+# Streamlit UI
 st.set_page_config(page_title="Tarefa AS05", layout="centered")
 st.title("📚 Assistente AS05 - Pergunte sobre um PDF!")
 st.markdown("Faça upload de seus PDFs e faça perguntas sobre o conteúdo deles.")
@@ -150,6 +146,7 @@ with st.sidebar:
             try:
                 with st.spinner("Processando PDFs..."):
                     raw_text = extract_text_from_pdf(pdf_docs)
+                    raw_text = clean_text(raw_text)  # 🔥 Corrigindo letras espaçadas
                     st.session_state.text_chunks = get_text_chunks(raw_text)
                     st.session_state.embeddings = generate_embeddings(st.session_state.text_chunks)
                     st.session_state.faiss_index = create_faiss_index(st.session_state.embeddings)
