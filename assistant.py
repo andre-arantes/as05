@@ -68,7 +68,7 @@ def truncate_context(context, question, max_tokens=800):
 def load_llm():
     try:
         return HuggingFacePipeline.from_model_id(
-            model_id="distilgpt2",
+            model_id="google/flan-t5-base",
             task="text-generation",
             pipeline_kwargs={"max_new_tokens": 200, "temperature": 0.05, "do_sample": True}
         )
@@ -78,16 +78,25 @@ def load_llm():
 
 def generate_response(query, context):
     if not context:
-        return "Não consegui encontrar informações relevantes nos documentos."
+        return "Não encontrei informações relevantes nos documentos."
+
     context_str = "\n".join(context)
     context_str = truncate_context(context_str, query, max_tokens=800)
+
     prompt_template = ChatPromptTemplate.from_template(
-        f"{context_str}\n\nPergunta: {query}\nResposta:"
+        f"Leia o conteúdo abaixo e responda de forma direta à pergunta.\n\n[Conteúdo]\n{context_str}\n\n[Pergunta]\n{query}\n\n[Resposta]"
     )
+
     llm = load_llm()
     chain = prompt_template | llm
-    response = chain.invoke({"context": context_str, "input": query}).strip()
-    return response.replace("Resposta:", "").strip() or "Não sei"
+
+    try:
+        response = chain.invoke({"context": context_str, "input": query}).strip()
+        return response.replace("[Resposta]", "").strip() or "Não sei"
+    except Exception as e:
+        logger.error("Erro ao gerar resposta: %s", e)
+        return "Houve um erro ao tentar gerar a resposta."
+
 
 st.set_page_config(page_title="Tarefa AS05", layout="centered")
 st.title("📚 Assistente AS05 - Pergunte sobre um PDF!")
@@ -156,4 +165,4 @@ with st.sidebar:
         st.rerun()
 
 st.markdown("---")
-st.caption("Tarefa AS05 - André")
+st.caption("Made by André")
