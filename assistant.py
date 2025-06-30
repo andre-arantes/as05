@@ -69,8 +69,12 @@ def load_llm():
     try:
         return HuggingFacePipeline.from_model_id(
             model_id="google/flan-t5-base",
-            task="text-generation",
-            pipeline_kwargs={"max_new_tokens": 200, "temperature": 0.05, "do_sample": True}
+            task="text2text-generation",
+            pipeline_kwargs={
+                "max_new_tokens": 200,
+                "temperature": 0.05,
+                "do_sample": True
+            }
         )
     except Exception as e:
         st.error(f"Erro ao carregar LLM: {e}")
